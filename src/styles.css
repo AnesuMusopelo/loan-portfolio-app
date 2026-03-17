@@ -161,6 +161,10 @@ button {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.metrics-grid-large {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .two-col-grid {
   grid-template-columns: 1.15fr 1fr;
 }
@@ -271,6 +275,24 @@ button {
   font-weight: 700;
 }
 
+.primary-button:disabled,
+.danger-button:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.danger-button {
+  border: 1px solid rgba(255, 123, 123, 0.35);
+  background: rgba(255, 123, 123, 0.12);
+  color: #ffdada;
+  border-radius: 12px;
+  padding: 9px 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
 .table-wrap {
   overflow: auto;
 }
@@ -347,4 +369,21 @@ th {
     flex-direction: column;
     align-items: flex-start;
   }
+}
+
+.small-muted {
+  font-size: 0.82rem;
+}
+
+.note-item-flex {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.compact-table table td,
+.compact-table table th {
+  padding-top: 10px;
+  padding-bottom: 10px;
 }

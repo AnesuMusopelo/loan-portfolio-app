@@ -1,6 +1,5 @@
 import type { ReactElement } from 'react'
 import { useEffect, useMemo, useState } from 'react'
-//small change
 import {
   AlertTriangle,
   BarChart3,
@@ -12,6 +11,9 @@ import {
   Landmark,
   NotebookPen,
   ShieldAlert,
+  Trash2,
+  TrendingUp,
+  UserRoundCheck,
   Users,
   Wallet,
 } from 'lucide-react'
@@ -23,6 +25,10 @@ import {
   addCollectionNote,
   addLoan,
   addPayment,
+  deleteBorrower,
+  deleteCollectionNote,
+  deleteLoan,
+  deletePayment,
   getBorrowers,
   getCollectionNotes,
   getLoans,
@@ -35,6 +41,7 @@ import {
   computePortfolioSummary,
   currency,
   daysBetween,
+  loanStatusLabel,
   outstandingForLoan,
   percent,
   today,
@@ -62,6 +69,7 @@ export default function App() {
   const [collectionNotes, setCollectionNotes] = useState<CollectionNote[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [busyKey, setBusyKey] = useState('')
 
   const [borrowerForm, setBorrowerForm] = useState({
     full_name: '',
@@ -101,6 +109,7 @@ export default function App() {
   const refreshData = async () => {
     try {
       setLoading(true)
+      setError('')
       const [borrowerRows, loanRows, paymentRows, collectionRows] = await Promise.all([
         getBorrowers(),
         getLoans(),
@@ -138,6 +147,36 @@ export default function App() {
 
   const summary = useMemo(() => computePortfolioSummary(loans, payments), [loans, payments])
 
+  const borrowerStats = useMemo(
+    () =>
+      borrowers
+        .map((borrower) => {
+          const borrowerLoans = loans.filter((loan) => loan.borrower_id === borrower.id)
+          const borrowerLoanIds = borrowerLoans.map((loan) => loan.id)
+          const borrowerPayments = payments.filter((payment) => borrowerLoanIds.includes(payment.loan_id))
+          const outstanding = borrowerLoans.reduce((sum, loan) => sum + outstandingForLoan(loan, payments), 0)
+          const overdueLoans = borrowerLoans.filter((loan) => loanStatusLabel(loan, payments) === 'overdue').length
+          const activeLoans = borrowerLoans.filter((loan) => {
+            const status = loanStatusLabel(loan, payments)
+            return status === 'active' || status === 'overdue'
+          }).length
+          const totalBorrowed = borrowerLoans.reduce((sum, loan) => sum + loan.principal, 0)
+          const totalCollected = borrowerPayments.reduce((sum, payment) => sum + payment.amount, 0)
+          return {
+            borrower,
+            totalLoans: borrowerLoans.length,
+            activeLoans,
+            overdueLoans,
+            totalBorrowed,
+            totalCollected,
+            outstanding,
+            lastPaymentDate: borrowerPayments[0]?.payment_date ?? '—',
+          }
+        })
+        .sort((a, b) => b.outstanding - a.outstanding),
+    [borrowers, loans, payments],
+  )
+
   const monthlyChart = useMemo(() => {
     const map = new Map<string, { month: string; lent: number; collected: number }>()
 
@@ -168,10 +207,8 @@ export default function App() {
 
     return buckets.map((bucket) => {
       const total = loans.reduce((sum, loan) => {
-        const overdueDays = Math.max(daysBetween(loan.due_date, today()) * -1, 0)
         const daysLate = new Date(loan.due_date) < new Date(today()) ? Math.abs(daysBetween(today(), loan.due_date)) : 0
-        const score = daysLate || overdueDays
-        if (score >= bucket.min && score <= bucket.max) return sum + outstandingForLoan(loan, payments)
+        if (daysLate >= bucket.min && daysLate <= bucket.max) return sum + outstandingForLoan(loan, payments)
         return sum
       }, 0)
 
@@ -179,48 +216,90 @@ export default function App() {
     })
   }, [loans, payments])
 
+  const repaymentMix = useMemo(
+    () => [
+      { label: 'Collected', amount: summary.totalCollected },
+      { label: 'Outstanding', amount: summary.outstandingBalance },
+    ],
+    [summary.totalCollected, summary.outstandingBalance],
+  )
+
+  const riskyLoans = loansWithBorrowers
+    .filter((loan) => {
+      const status = loanStatusLabel(loan, payments)
+      return status === 'overdue' || status === 'defaulted'
+    })
+    .sort((a, b) => outstandingForLoan(b, payments) - outstandingForLoan(a, payments))
+    .slice(0, 5)
+
+  const upcomingFollowUps = useMemo(
+    () =>
+      collectionNotes
+        .filter((note) => note.next_action_date && note.next_action_date >= today())
+        .sort((a, b) => (a.next_action_date ?? '').localeCompare(b.next_action_date ?? ''))
+        .slice(0, 6),
+    [collectionNotes],
+  )
+
+  const withBusy = async (key: string, action: () => Promise<void>) => {
+    try {
+      setBusyKey(key)
+      setError('')
+      await action()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong.')
+    } finally {
+      setBusyKey('')
+    }
+  }
+
+  const confirmDelete = (message: string) => window.confirm(message)
+
   const submitBorrower = async (event: React.FormEvent) => {
     event.preventDefault()
-    await addBorrower(borrowerForm)
-    setBorrowerForm({ full_name: '', phone: '', national_id: '', address: '', risk_notes: '' })
-    await refreshData()
+    await withBusy('borrower-create', async () => {
+      await addBorrower(borrowerForm)
+      setBorrowerForm({ full_name: '', phone: '', national_id: '', address: '', risk_notes: '' })
+      await refreshData()
+    })
   }
 
   const submitLoan = async (event: React.FormEvent) => {
     event.preventDefault()
-    await addLoan({
-      ...loanForm,
-      principal: Number(loanForm.principal),
-      interest_rate: Number(loanForm.interest_rate),
+    await withBusy('loan-create', async () => {
+      await addLoan({
+        ...loanForm,
+        principal: Number(loanForm.principal),
+        interest_rate: Number(loanForm.interest_rate),
+      })
+      setLoanForm((current) => ({ ...current, principal: '1000', interest_rate: '25', purpose: '', notes: '' }))
+      await refreshData()
     })
-    setLoanForm((current) => ({ ...current, principal: '1000', interest_rate: '25', purpose: '', notes: '' }))
-    await refreshData()
   }
 
   const submitPayment = async (event: React.FormEvent) => {
     event.preventDefault()
-    await addPayment({
-      ...paymentForm,
-      amount: Number(paymentForm.amount),
+    await withBusy('payment-create', async () => {
+      await addPayment({
+        ...paymentForm,
+        amount: Number(paymentForm.amount),
+      })
+      setPaymentForm((current) => ({ ...current, amount: '0', reference: '', notes: '' }))
+      await refreshData()
     })
-    setPaymentForm((current) => ({ ...current, amount: '0', reference: '', notes: '' }))
-    await refreshData()
   }
 
   const submitCollectionNote = async (event: React.FormEvent) => {
     event.preventDefault()
-    await addCollectionNote({
-      ...collectionForm,
-      next_action_date: collectionForm.next_action_date || null,
+    await withBusy('collection-create', async () => {
+      await addCollectionNote({
+        ...collectionForm,
+        next_action_date: collectionForm.next_action_date || null,
+      })
+      setCollectionForm((current) => ({ ...current, note: '', next_action_date: '' }))
+      await refreshData()
     })
-    setCollectionForm((current) => ({ ...current, note: '', next_action_date: '' }))
-    await refreshData()
   }
-
-  const riskyLoans = loansWithBorrowers
-    .filter((loan) => loan.status === 'overdue' || loan.status === 'defaulted')
-    .sort((a, b) => outstandingForLoan(b, payments) - outstandingForLoan(a, payments))
-    .slice(0, 5)
 
   return (
     <div className="app-shell">
@@ -274,43 +353,19 @@ export default function App() {
 
         {view === 'dashboard' && (
           <>
-            <section className="metrics-grid">
-              <MetricCard
-                label="Total principal issued"
-                value={currency(summary.totalPrincipalIssued)}
-                hint="All loans ever created"
-                icon={<Landmark size={22} />}
-              />
-              <MetricCard
-                label="Active exposure"
-                value={currency(summary.activeExposure)}
-                hint="Capital still at risk"
-                icon={<ShieldAlert size={22} />}
-              />
-              <MetricCard
-                label="Total collected"
-                value={currency(summary.totalCollected)}
-                hint="Cash already returned"
-                icon={<Coins size={22} />}
-              />
-              <MetricCard
-                label="Expected interest"
-                value={currency(summary.expectedInterest)}
-                hint="If every loan is repaid"
-                icon={<CircleDollarSign size={22} />}
-              />
-              <MetricCard
-                label="Overdue balance"
-                value={currency(summary.overdueBalance)}
-                hint={`${summary.overdueCount} overdue account(s)`}
-                icon={<AlertTriangle size={22} />}
-              />
-              <MetricCard
-                label="Collection rate"
-                value={percent(summary.collectionRate)}
-                hint={`${summary.loansDueThisWeek} due in 7 days`}
-                icon={<Clock3 size={22} />}
-              />
+            <section className="metrics-grid metrics-grid-large">
+              <MetricCard label="Total principal issued" value={currency(summary.totalPrincipalIssued)} hint="All loans ever created" icon={<Landmark size={22} />} />
+              <MetricCard label="Active exposure" value={currency(summary.activeExposure)} hint="Capital still at risk" icon={<ShieldAlert size={22} />} />
+              <MetricCard label="Outstanding balance" value={currency(summary.outstandingBalance)} hint="Still expected back from clients" icon={<Wallet size={22} />} />
+              <MetricCard label="Total collected" value={currency(summary.totalCollected)} hint="Cash already returned" icon={<Coins size={22} />} />
+              <MetricCard label="Expected interest" value={currency(summary.expectedInterest)} hint="If every loan is repaid" icon={<CircleDollarSign size={22} />} />
+              <MetricCard label="Overdue balance" value={currency(summary.overdueBalance)} hint={`${summary.overdueCount} overdue account(s)`} icon={<AlertTriangle size={22} />} />
+              <MetricCard label="Collection rate" value={percent(summary.collectionRate)} hint={`${summary.loansDueThisWeek} due in 7 days`} icon={<Clock3 size={22} />} />
+              <MetricCard label="Repayment progress" value={percent(summary.repaymentProgress)} hint={`${summary.paidLoanCount} loan(s) fully cleared`} icon={<TrendingUp size={22} />} />
+              <MetricCard label="Active borrowers" value={String(summary.activeBorrowers)} hint={`${summary.repeatBorrowers} repeat borrower(s)`} icon={<Users size={22} />} />
+              <MetricCard label="Average loan size" value={currency(summary.averageLoanSize)} hint={`${summary.averageInterestRate.toFixed(1)}% avg interest`} icon={<HandCoins size={22} />} />
+              <MetricCard label="Due today" value={String(summary.dueTodayCount)} hint={`${summary.loansDueThisMonth} due in 30 days`} icon={<UserRoundCheck size={22} />} />
+              <MetricCard label="Average days late" value={`${summary.averageDaysLate.toFixed(1)} days`} hint={`${summary.defaultCount} defaulted account(s)`} icon={<Clock3 size={22} />} />
             </section>
 
             <section className="two-col-grid">
@@ -345,7 +400,7 @@ export default function App() {
                         <div>
                           <strong>{loan.borrower?.full_name ?? 'Unknown borrower'}</strong>
                           <div className="muted-line">
-                            {loan.status.toUpperCase()} · due {loan.due_date} · {loan.borrower?.phone}
+                            {loanStatusLabel(loan, payments).toUpperCase()} · due {loan.due_date} · {loan.borrower?.phone}
                           </div>
                         </div>
                         <strong>{currency(outstandingForLoan(loan, payments))}</strong>
@@ -364,11 +419,7 @@ export default function App() {
               <form className="form-grid" onSubmit={submitBorrower}>
                 <label>
                   Full name
-                  <input
-                    value={borrowerForm.full_name}
-                    onChange={(e) => setBorrowerForm({ ...borrowerForm, full_name: e.target.value })}
-                    required
-                  />
+                  <input value={borrowerForm.full_name} onChange={(e) => setBorrowerForm({ ...borrowerForm, full_name: e.target.value })} required />
                 </label>
                 <label>
                   Phone
@@ -376,11 +427,7 @@ export default function App() {
                 </label>
                 <label>
                   National ID
-                  <input
-                    value={borrowerForm.national_id}
-                    onChange={(e) => setBorrowerForm({ ...borrowerForm, national_id: e.target.value })}
-                    required
-                  />
+                  <input value={borrowerForm.national_id} onChange={(e) => setBorrowerForm({ ...borrowerForm, national_id: e.target.value })} required />
                 </label>
                 <label>
                   Address
@@ -388,14 +435,10 @@ export default function App() {
                 </label>
                 <label className="full-span">
                   Risk notes
-                  <textarea
-                    rows={4}
-                    value={borrowerForm.risk_notes}
-                    onChange={(e) => setBorrowerForm({ ...borrowerForm, risk_notes: e.target.value })}
-                  />
+                  <textarea rows={4} value={borrowerForm.risk_notes} onChange={(e) => setBorrowerForm({ ...borrowerForm, risk_notes: e.target.value })} />
                 </label>
-                <button className="primary-button" type="submit">
-                  Save borrower
+                <button className="primary-button" type="submit" disabled={busyKey === 'borrower-create'}>
+                  {busyKey === 'borrower-create' ? 'Saving...' : 'Save borrower'}
                 </button>
               </form>
             </SectionCard>
@@ -407,19 +450,41 @@ export default function App() {
                     <tr>
                       <th>Name</th>
                       <th>Phone</th>
-                      <th>ID</th>
-                      <th>Address</th>
-                      <th>Risk notes</th>
+                      <th>Loans</th>
+                      <th>Collected</th>
+                      <th>Outstanding</th>
+                      <th>Overdue</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {borrowers.map((borrower) => (
-                      <tr key={borrower.id}>
-                        <td>{borrower.full_name}</td>
-                        <td>{borrower.phone}</td>
-                        <td>{borrower.national_id}</td>
-                        <td>{borrower.address}</td>
-                        <td>{borrower.risk_notes}</td>
+                    {borrowerStats.map((entry) => (
+                      <tr key={entry.borrower.id}>
+                        <td>
+                          <strong>{entry.borrower.full_name}</strong>
+                          <div className="muted-line small-muted">{entry.borrower.national_id}</div>
+                        </td>
+                        <td>{entry.borrower.phone}</td>
+                        <td>{entry.totalLoans}</td>
+                        <td>{currency(entry.totalCollected)}</td>
+                        <td>{currency(entry.outstanding)}</td>
+                        <td>{entry.overdueLoans}</td>
+                        <td>
+                          <button
+                            className="danger-button"
+                            type="button"
+                            disabled={busyKey === `borrower-${entry.borrower.id}`}
+                            onClick={() => {
+                              if (!confirmDelete(`Delete ${entry.borrower.full_name}? This also removes linked loans, payments, and collection notes.`)) return
+                              void withBusy(`borrower-${entry.borrower.id}`, async () => {
+                                await deleteBorrower(entry.borrower.id)
+                                await refreshData()
+                              })
+                            }}
+                          >
+                            <Trash2 size={14} /> Delete
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -437,9 +502,7 @@ export default function App() {
                   Borrower
                   <select value={loanForm.borrower_id} onChange={(e) => setLoanForm({ ...loanForm, borrower_id: e.target.value })} required>
                     {borrowers.map((borrower) => (
-                      <option key={borrower.id} value={borrower.id}>
-                        {borrower.full_name}
-                      </option>
+                      <option key={borrower.id} value={borrower.id}>{borrower.full_name}</option>
                     ))}
                   </select>
                 </label>
@@ -449,13 +512,7 @@ export default function App() {
                 </label>
                 <label>
                   Interest %
-                  <input
-                    value={loanForm.interest_rate}
-                    onChange={(e) => setLoanForm({ ...loanForm, interest_rate: e.target.value })}
-                    type="number"
-                    min="0"
-                    required
-                  />
+                  <input value={loanForm.interest_rate} onChange={(e) => setLoanForm({ ...loanForm, interest_rate: e.target.value })} type="number" min="0" required />
                 </label>
                 <label>
                   Issue date
@@ -482,8 +539,8 @@ export default function App() {
                   Notes
                   <textarea rows={4} value={loanForm.notes} onChange={(e) => setLoanForm({ ...loanForm, notes: e.target.value })} />
                 </label>
-                <button className="primary-button" type="submit">
-                  Save loan
+                <button className="primary-button" type="submit" disabled={busyKey === 'loan-create'}>
+                  {busyKey === 'loan-create' ? 'Saving...' : 'Save loan'}
                 </button>
               </form>
             </SectionCard>
@@ -500,22 +557,40 @@ export default function App() {
                       <th>Outstanding</th>
                       <th>Status</th>
                       <th>Due</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {loansWithBorrowers.map((loan) => (
-                      <tr key={loan.id}>
-                        <td>{loan.borrower?.full_name}</td>
-                        <td>{currency(loan.principal)}</td>
-                        <td>{currency(totalExpectedRepayment(loan))}</td>
-                        <td>{currency(totalPaidForLoan(loan.id, payments))}</td>
-                        <td>{currency(outstandingForLoan(loan, payments))}</td>
-                        <td>
-                          <span className={`status status-${loan.status}`}>{loan.status}</span>
-                        </td>
-                        <td>{loan.due_date}</td>
-                      </tr>
-                    ))}
+                    {loansWithBorrowers.map((loan) => {
+                      const status = loanStatusLabel(loan, payments)
+                      return (
+                        <tr key={loan.id}>
+                          <td>{loan.borrower?.full_name}</td>
+                          <td>{currency(loan.principal)}</td>
+                          <td>{currency(totalExpectedRepayment(loan))}</td>
+                          <td>{currency(totalPaidForLoan(loan.id, payments))}</td>
+                          <td>{currency(outstandingForLoan(loan, payments))}</td>
+                          <td><span className={`status status-${status}`}>{status}</span></td>
+                          <td>{loan.due_date}</td>
+                          <td>
+                            <button
+                              className="danger-button"
+                              type="button"
+                              disabled={busyKey === `loan-${loan.id}`}
+                              onClick={() => {
+                                if (!confirmDelete(`Delete loan for ${loan.borrower?.full_name ?? 'this borrower'}? Payments and notes linked to it will also be removed.`)) return
+                                void withBusy(`loan-${loan.id}`, async () => {
+                                  await deleteLoan(loan.id)
+                                  await refreshData()
+                                })
+                              }}
+                            >
+                              <Trash2 size={14} /> Delete
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -531,9 +606,7 @@ export default function App() {
                   Loan
                   <select value={paymentForm.loan_id} onChange={(e) => setPaymentForm({ ...paymentForm, loan_id: e.target.value })} required>
                     {loansWithBorrowers.map((loan) => (
-                      <option key={loan.id} value={loan.id}>
-                        {loan.borrower?.full_name} · due {currency(outstandingForLoan(loan, payments))}
-                      </option>
+                      <option key={loan.id} value={loan.id}>{loan.borrower?.full_name} · due {currency(outstandingForLoan(loan, payments))}</option>
                     ))}
                   </select>
                 </label>
@@ -557,8 +630,8 @@ export default function App() {
                   Notes
                   <textarea rows={4} value={paymentForm.notes} onChange={(e) => setPaymentForm({ ...paymentForm, notes: e.target.value })} />
                 </label>
-                <button className="primary-button" type="submit">
-                  Save payment
+                <button className="primary-button" type="submit" disabled={busyKey === 'payment-create'}>
+                  {busyKey === 'payment-create' ? 'Saving...' : 'Save payment'}
                 </button>
               </form>
             </SectionCard>
@@ -573,6 +646,7 @@ export default function App() {
                       <th>Amount</th>
                       <th>Method</th>
                       <th>Reference</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -585,6 +659,22 @@ export default function App() {
                           <td>{currency(payment.amount)}</td>
                           <td>{payment.method}</td>
                           <td>{payment.reference}</td>
+                          <td>
+                            <button
+                              className="danger-button"
+                              type="button"
+                              disabled={busyKey === `payment-${payment.id}`}
+                              onClick={() => {
+                                if (!confirmDelete('Delete this payment entry?')) return
+                                void withBusy(`payment-${payment.id}`, async () => {
+                                  await deletePayment(payment.id)
+                                  await refreshData()
+                                })
+                              }}
+                            >
+                              <Trash2 size={14} /> Delete
+                            </button>
+                          </td>
                         </tr>
                       )
                     })}
@@ -603,9 +693,7 @@ export default function App() {
                   Loan
                   <select value={collectionForm.loan_id} onChange={(e) => setCollectionForm({ ...collectionForm, loan_id: e.target.value })} required>
                     {loansWithBorrowers.map((loan) => (
-                      <option key={loan.id} value={loan.id}>
-                        {loan.borrower?.full_name} · {loan.status}
-                      </option>
+                      <option key={loan.id} value={loan.id}>{loan.borrower?.full_name} · {loanStatusLabel(loan, payments)}</option>
                     ))}
                   </select>
                 </label>
@@ -615,52 +703,63 @@ export default function App() {
                 </label>
                 <label>
                   Next action date
-                  <input
-                    value={collectionForm.next_action_date}
-                    onChange={(e) => setCollectionForm({ ...collectionForm, next_action_date: e.target.value })}
-                    type="date"
-                  />
+                  <input value={collectionForm.next_action_date} onChange={(e) => setCollectionForm({ ...collectionForm, next_action_date: e.target.value })} type="date" />
                 </label>
                 <label className="full-span">
                   Follow-up note
                   <textarea rows={5} value={collectionForm.note} onChange={(e) => setCollectionForm({ ...collectionForm, note: e.target.value })} required />
                 </label>
-                <button className="primary-button" type="submit">
-                  Save follow-up
+                <button className="primary-button" type="submit" disabled={busyKey === 'collection-create'}>
+                  {busyKey === 'collection-create' ? 'Saving...' : 'Save follow-up'}
                 </button>
               </form>
             </SectionCard>
 
             <SectionCard title="Collections board" subtitle="Focus on arrears, promises to pay, and next steps">
               <div className="stack-list">
-                {loansWithBorrowers
-                  .filter((loan) => loan.status === 'overdue' || loan.status === 'defaulted')
-                  .map((loan) => (
-                    <article key={loan.id} className="collection-card">
-                      <div className="collection-topline">
-                        <div>
-                          <strong>{loan.borrower?.full_name}</strong>
-                          <div className="muted-line">
-                            Outstanding {currency(outstandingForLoan(loan, payments))} · {loan.borrower?.phone}
-                          </div>
-                        </div>
-                        <span className={`status status-${loan.status}`}>{loan.status}</span>
+                {loansWithBorrowers.filter((loan) => {
+                  const status = loanStatusLabel(loan, payments)
+                  return status === 'overdue' || status === 'defaulted'
+                }).map((loan) => (
+                  <article key={loan.id} className="collection-card">
+                    <div className="collection-topline">
+                      <div>
+                        <strong>{loan.borrower?.full_name}</strong>
+                        <div className="muted-line">Outstanding {currency(outstandingForLoan(loan, payments))} · {loan.borrower?.phone}</div>
                       </div>
-                      <div className="note-list">
-                        {loan.collectionNotes && loan.collectionNotes.length > 0 ? (
-                          loan.collectionNotes.map((note) => (
-                            <div key={note.id} className="note-item">
+                      <span className={`status status-${loanStatusLabel(loan, payments)}`}>{loanStatusLabel(loan, payments)}</span>
+                    </div>
+                    <div className="note-list">
+                      {loan.collectionNotes && loan.collectionNotes.length > 0 ? (
+                        loan.collectionNotes.map((note) => (
+                          <div key={note.id} className="note-item note-item-flex">
+                            <div>
                               <strong>{note.contact_date}</strong>
                               <p>{note.note}</p>
                               {note.next_action_date ? <span>Next action: {note.next_action_date}</span> : null}
                             </div>
-                          ))
-                        ) : (
-                          <p className="empty-text">No collection notes yet for this loan.</p>
-                        )}
-                      </div>
-                    </article>
-                  ))}
+                            <button
+                              className="danger-button"
+                              type="button"
+                              disabled={busyKey === `note-${note.id}`}
+                              onClick={() => {
+                                if (!confirmDelete('Delete this follow-up note?')) return
+                                void withBusy(`note-${note.id}`, async () => {
+                                  await deleteCollectionNote(note.id)
+                                  await refreshData()
+                                })
+                              }}
+                            >
+                              <Trash2 size={14} /> Delete
+                            </button>
+                          </div>
+                        ))
+                      ) : (
+                        <p className="empty-text">No collection notes yet for this loan.</p>
+                      )}
+                    </div>
+                  </article>
+                ))}
               </div>
             </SectionCard>
           </section>
@@ -682,24 +781,65 @@ export default function App() {
               </div>
             </SectionCard>
 
-            <SectionCard title="Key operating questions" subtitle="The app is meant to answer these at a glance">
+            <SectionCard title="Collected vs outstanding" subtitle="How much of the book has already come back">
+              <div className="chart-box">
+                <ResponsiveContainer width="100%" height={280}>
+                  <BarChart data={repaymentMix} layout="vertical">
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis type="number" />
+                    <YAxis type="category" dataKey="label" width={90} />
+                    <Tooltip formatter={(value) => currency(Number(value ?? 0))} />
+                    <Bar dataKey="amount" fill="currentColor" radius={[0, 8, 8, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </SectionCard>
+
+            <SectionCard title="Borrower performance" subtitle="Which clients are carrying the most balance and attention">
+              <div className="table-wrap compact-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Borrower</th>
+                      <th>Loans</th>
+                      <th>Outstanding</th>
+                      <th>Overdue</th>
+                      <th>Last payment</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {borrowerStats.slice(0, 8).map((entry) => (
+                      <tr key={entry.borrower.id}>
+                        <td>{entry.borrower.full_name}</td>
+                        <td>{entry.totalLoans}</td>
+                        <td>{currency(entry.outstanding)}</td>
+                        <td>{entry.overdueLoans}</td>
+                        <td>{entry.lastPaymentDate}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </SectionCard>
+
+            <SectionCard title="Upcoming follow-ups" subtitle="Collection actions that are already scheduled">
               <div className="insight-list">
-                <div className="insight-item">
-                  <strong>How much of my money is still out there?</strong>
-                  <span>{currency(summary.outstandingBalance)}</span>
-                </div>
-                <div className="insight-item">
-                  <strong>How much is already in trouble?</strong>
-                  <span>{currency(summary.overdueBalance)}</span>
-                </div>
-                <div className="insight-item">
-                  <strong>How many loans need attention this month?</strong>
-                  <span>{summary.loansDueThisMonth}</span>
-                </div>
-                <div className="insight-item">
-                  <strong>How much interest is on the table?</strong>
-                  <span>{currency(summary.expectedInterest)}</span>
-                </div>
+                {upcomingFollowUps.length === 0 ? (
+                  <p className="empty-text">No upcoming follow-ups scheduled yet.</p>
+                ) : (
+                  upcomingFollowUps.map((note) => {
+                    const loan = loansWithBorrowers.find((entry) => entry.id === note.loan_id)
+                    return (
+                      <div key={note.id} className="insight-item">
+                        <div>
+                          <strong>{loan?.borrower?.full_name ?? 'Unknown borrower'}</strong>
+                          <div className="muted-line">{note.note}</div>
+                        </div>
+                        <span>{note.next_action_date}</span>
+                      </div>
+                    )
+                  })
+                )}
               </div>
             </SectionCard>
           </section>

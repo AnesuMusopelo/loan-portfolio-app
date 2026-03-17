@@ -54,6 +54,21 @@ export async function addBorrower(payload: Omit<Borrower, 'id' | 'created_at'>) 
   return data as Borrower
 }
 
+export async function deleteBorrower(borrowerId: string) {
+  if (!hasSupabaseEnv || !supabase) {
+    const db = loadDemoDb()
+    const borrowerLoanIds = db.loans.filter((loan) => loan.borrower_id === borrowerId).map((loan) => loan.id)
+    db.borrowers = db.borrowers.filter((borrower) => borrower.id !== borrowerId)
+    db.loans = db.loans.filter((loan) => loan.borrower_id !== borrowerId)
+    db.payments = db.payments.filter((payment) => !borrowerLoanIds.includes(payment.loan_id))
+    db.collection_notes = db.collection_notes.filter((note) => !borrowerLoanIds.includes(note.loan_id))
+    saveDemoDb(db)
+    return
+  }
+  const { error } = await supabase.from('borrowers').delete().eq('id', borrowerId)
+  if (error) throw error
+}
+
 export async function getLoans() {
   if (!hasSupabaseEnv || !supabase) return loadDemoDb().loans
   const { data, error } = await supabase.from('loans').select('*').order('created_at', { ascending: false })
@@ -74,6 +89,19 @@ export async function addLoan(payload: Omit<Loan, 'id' | 'created_at'>) {
   return data as Loan
 }
 
+export async function deleteLoan(loanId: string) {
+  if (!hasSupabaseEnv || !supabase) {
+    const db = loadDemoDb()
+    db.loans = db.loans.filter((loan) => loan.id !== loanId)
+    db.payments = db.payments.filter((payment) => payment.loan_id !== loanId)
+    db.collection_notes = db.collection_notes.filter((note) => note.loan_id !== loanId)
+    saveDemoDb(db)
+    return
+  }
+  const { error } = await supabase.from('loans').delete().eq('id', loanId)
+  if (error) throw error
+}
+
 export async function getPayments() {
   if (!hasSupabaseEnv || !supabase) return loadDemoDb().payments
   const { data, error } = await supabase.from('payments').select('*').order('payment_date', { ascending: false })
@@ -92,6 +120,17 @@ export async function addPayment(payload: Omit<Payment, 'id' | 'created_at'>) {
   const { data, error } = await supabase.from('payments').insert(payload).select().single()
   if (error) throw error
   return data as Payment
+}
+
+export async function deletePayment(paymentId: string) {
+  if (!hasSupabaseEnv || !supabase) {
+    const db = loadDemoDb()
+    db.payments = db.payments.filter((payment) => payment.id !== paymentId)
+    saveDemoDb(db)
+    return
+  }
+  const { error } = await supabase.from('payments').delete().eq('id', paymentId)
+  if (error) throw error
 }
 
 export async function getCollectionNotes() {
@@ -115,4 +154,15 @@ export async function addCollectionNote(payload: Omit<CollectionNote, 'id' | 'cr
   const { data, error } = await supabase.from('collection_notes').insert(payload).select().single()
   if (error) throw error
   return data as CollectionNote
+}
+
+export async function deleteCollectionNote(noteId: string) {
+  if (!hasSupabaseEnv || !supabase) {
+    const db = loadDemoDb()
+    db.collection_notes = db.collection_notes.filter((note) => note.id !== noteId)
+    saveDemoDb(db)
+    return
+  }
+  const { error } = await supabase.from('collection_notes').delete().eq('id', noteId)
+  if (error) throw error
 }

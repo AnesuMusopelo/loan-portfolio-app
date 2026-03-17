@@ -61,4 +61,12 @@ export interface PortfolioSummary {
   overdueCount: number
   defaultCount: number
   collectionRate: number
+  activeBorrowers: number
+  repeatBorrowers: number
+  averageLoanSize: number
+  averageInterestRate: number
+  dueTodayCount: number
+  paidLoanCount: number
+  repaymentProgress: number
+  averageDaysLate: number
 }
